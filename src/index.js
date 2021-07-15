@@ -72,7 +72,6 @@ function attachAfterEmitHook(compiler, callback) {
 class SentryCliPlugin {
   constructor(options = {}) {
     const defaults = {
-      debug: false,
       finalize: true,
       rewrite: true,
     };
@@ -126,6 +125,11 @@ class SentryCliPlugin {
   getSentryCli() {
     const cli = new SentryCli(this.options.configFile, {
       silent: this.isSilent(),
+      org: this.options.org,
+      project: this.options.project,
+      authToken: this.options.authToken,
+      url: this.options.url,
+      vcsRemote: this.options.vcsRemote,
     });
 
     if (this.isDryRun()) {
@@ -154,7 +158,7 @@ class SentryCliPlugin {
             this.outputDebug('Calling set-commits with:\n', config);
             return Promise.resolve(release, config);
           },
-          deploy: (release, config) => {
+          newDeploy: (release, config) => {
             this.outputDebug('Calling deploy with:\n', config);
             return Promise.resolve(release, config);
           },
@@ -182,7 +186,7 @@ class SentryCliPlugin {
   }
 
   /** Checks if the given named entry point should be handled. */
-  checkEntry(key) {
+  shouldInjectEntry(key) {
     const { entries } = this.options;
     if (entries == null) {
       return true;
@@ -206,32 +210,86 @@ class SentryCliPlugin {
   }
 
   /** Injects the release string into the given entry point. */
-  injectEntry(originalEntry, newEntry) {
-    if (Array.isArray(originalEntry)) {
-      return [newEntry].concat(originalEntry);
+  injectEntry(entry, sentryModule) {
+    if (!entry) {
+      return sentryModule;
     }
 
-    if (originalEntry !== null && typeof originalEntry === 'object') {
-      return Object.keys(originalEntry).reduce((acc, key) => {
-        acc[key] = this.checkEntry(key)
-          ? this.injectEntry(originalEntry[key], newEntry)
-          : originalEntry[key];
-        return acc;
-      }, {});
+    /**
+     * in:
+     *   entry: 'index.js'
+     * out:
+     *   entry: ['sentry-webpack.module.js', 'index.js']
+     */
+    if (typeof entry === 'string') {
+      return [sentryModule, entry];
     }
 
-    if (typeof originalEntry === 'string') {
-      return [newEntry, originalEntry];
+    /**
+     * in:
+     *   entry: ['index.js', 'header.js', 'footer.js']
+     * out:
+     *   entry: ['sentry-webpack.module.js', 'index.js', 'header.js', 'footer.js']
+     */
+    if (Array.isArray(entry)) {
+      return [sentryModule].concat(entry);
     }
 
-    if (typeof originalEntry === 'function') {
+    /**
+     * in:
+     *   entry: () => 'index.js'
+     *   entry: () => ['index.js']
+     * out:
+     *   entry: ['sentry-webpack.module.js', 'index.js']
+     *   entry: ['sentry-webpack.module.js', 'index.js']
+     */
+    if (typeof entry === 'function') {
       return () =>
-        Promise.resolve(originalEntry()).then(entry =>
-          this.injectEntry(entry, newEntry)
+        Promise.resolve(entry()).then(resolvedEntry =>
+          this.injectEntry(resolvedEntry, sentryModule)
         );
     }
 
-    return newEntry;
+    /**
+     * in:
+     *   entry: {
+     *     home: './home.js',
+     *     about: ['./about.js'],
+     *     contact: () => './contact.js',
+     *     login: {
+     *       import: './login.js',
+     *     },
+     *     logout: {
+     *       import: ['./logout.js']
+     *     }
+     *   }
+     * out:
+     *   entry: {
+     *     home: ['sentry-webpack.module.js', './home.js'],
+     *     about: ['sentry-webpack.module.js', './about.js'],
+     *     contact: ['sentry-webpack.module.js', './contact.js'],
+     *     login: {
+     *       import: ['sentry-webpack.module.js', './login.js']
+     *     },
+     *     logout: {
+     *       import: ['sentry-webpack.module.js', './logout.js']
+     *     }
+     *   }
+     */
+    const modifiedEntry = { ...entry };
+    Object.keys(modifiedEntry)
+      .filter(key => this.shouldInjectEntry(key))
+      .forEach(key => {
+        if (entry[key] && entry[key].import) {
+          modifiedEntry[key].import = this.injectEntry(
+            entry[key].import,
+            sentryModule
+          );
+        } else {
+          modifiedEntry[key] = this.injectEntry(entry[key], sentryModule);
+        }
+      });
+    return modifiedEntry;
   }
 
   /** Webpack 2: Adds a new loader for the release module. */
@@ -332,10 +390,25 @@ class SentryCliPlugin {
 
         return this.cli.releases.new(release);
       })
+      .then(() => {
+        if (this.options.cleanArtifacts) {
+          return this.cli.releases.execute(
+            ['releases', 'files', release, 'delete', '--all'],
+            true
+          );
+        }
+        return undefined;
+      })
       .then(() => this.cli.releases.uploadSourceMaps(release, this.options))
       .then(() => {
-        const { commit, previousCommit, repo, auto } =
-          this.options.setCommits || this.options;
+        const {
+          commit,
+          previousCommit,
+          repo,
+          auto,
+          ignoreMissing,
+          ignoreEmpty,
+        } = this.options.setCommits || this.options;
 
         if (auto || (repo && commit)) {
           return this.cli.releases.setCommits(release, {
@@ -343,9 +416,10 @@ class SentryCliPlugin {
             previousCommit,
             repo,
             auto,
+            ignoreMissing,
+            ignoreEmpty,
           });
         }
-
         return undefined;
       })
       .then(() => {
@@ -370,17 +444,35 @@ class SentryCliPlugin {
         }
         return undefined;
       })
-      .catch(err =>
+      .catch(err => {
         errorHandler(
           err,
-          () => compilation.errors.push(`Sentry CLI Plugin: ${err.message}`),
+          () =>
+            compilation.errors.push(
+              new Error(`Sentry CLI Plugin: ${err.message}`)
+            ),
           compilation
-        )
-      );
+        );
+      });
   }
 
   /** Webpack lifecycle hook to update compiler options. */
   apply(compiler) {
+    /**
+     * Determines whether plugin should be applied not more than once during whole webpack run.
+     * Useful when the process is performing multiple builds using the same config.
+     * It cannot be stored on the instance, as every run is creating a new one.
+     */
+    if (this.options.runOnce && module.alreadyRun) {
+      if (this.options.debug) {
+        this.outputDebug(
+          '`runOnce` option set and plugin already ran. Skipping release.'
+        );
+      }
+      return;
+    }
+    module.alreadyRun = true;
+
     const compilerOptions = compiler.options || {};
     ensure(compilerOptions, 'module', Object);
 
@@ -391,6 +483,12 @@ class SentryCliPlugin {
     }
 
     attachAfterEmitHook(compiler, (compilation, cb) => {
+      if (!this.options.include || !this.options.include.length) {
+        ensure(compilerOptions, 'output', Object);
+        if (compilerOptions.output.path) {
+          this.options.include = [compilerOptions.output.path];
+        }
+      }
       this.finalizeRelease(compilation).then(() => cb());
     });
   }

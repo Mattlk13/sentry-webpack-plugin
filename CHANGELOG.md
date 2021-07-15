@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+- "Would I rather be feared or loved? Easy. Both. I want people to be afraid of how much they love me." — Michael Scott
+
+## v1.16.0
+
+- feat: Add `ignoreMissing` sub-option to `setCommits` option (#281)
+- fix: Add missing `dist` option to `SentryCliPluginOptions` type (#285)
+- deps: Update sentry-cli to v1.67
+
+## v1.15.1
+
+- deps: Update sentry-cli to v1.64
+
+## v1.15.0
+
+- feat: Add `cleanAftifacts` option to remove all previously uploaded files in a release (#264)
+- feat: Add `runOnce` option to allow for skipping multiple uploads with the same config (#270)
+
+## v1.14.2
+
+- deps: Update sentry-cli to v1.63 for ARM support
+
+## v1.14.1
+
+- fix: Use `WebpackPluginInstance` type for Webpack v4 and v5 compatibility (#259)
+
+## v1.14.0
+
+- feat: Add support for Webpack 5 entry descriptors (#241)
+
+## v1.13.0
+
+- feat: Support minimal CLI options (#225)
+- fix: Return an actual error for propagation (#224)
+- deps: Bump sentry-cli to `1.58.0`
+
+## v1.12.1
+
+- fix(deploy): change deploy to newDeploy in mocked CLI object (#206)
+- fix(types): add deploy configuration to type definitions (#208)
+
+## v1.12.0
+
+- feat: Allow to perform release deploys (#192)
+- fix: CJS/TS Exports Interop (#190)
+- fix: make setCommits.repo type optional (#200)
+- deps: Bump sentry-cli to `1.55.0`
+
 ## v1.11.1
 
 - meta: Bump sentry-cli to `1.52.3` which fixes output handlers
